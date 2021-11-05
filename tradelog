@@ -1,0 +1,324 @@
+#!/bin/sh
+
+export POSIXLY_CORRECT=yes
+export LC_NUMERIC=en_US.UTF-8
+export LC_COLLATE=C
+
+help()
+{
+	printf "Napoveda - ./tradelog [-h|--help]\n"
+	printf "Pouzitie - ./tradelog [FILTER] [PRIKAZ] [LOG [LOG2 [...]]]\n\n"
+	printf "PRIKAZY:\n"
+	printf "list-tick – vypis zoznamu vyskytujucich sa burzovych symbolov, tzv. “tickerov”.\n"
+	printf "profit – vypis celkoveho zisku z uzavrenych pozicii.\n"
+	printf "pos – vypis hodnot aktualne drzanych pozicii zoradenych zostupne podla hodnoty.\n"
+	printf "last-price – vypis poslednej znamej ceny pre kazdy ticker.\n"
+	printf "hist-ord – vypis histogramu poctu transakcii podla tickeru.\n"
+	printf "graph-pos – vypis grafu hodnot drzanych pozicii podle tickeru.\n\n"
+	printf "FILTRE:\n"
+	printf "'-a DATETIME' – after: jsou uvažovány pouze záznamy PO tomto datu (bez tohoto data).\n"
+	printf "DATETIME je formátu: YYYY-MM-DD HH:MM:SS.\n"
+	printf "'-b DATETIME' – before: jsou uvažovány pouze záznamy PŘED tímto datem (bez tohoto data).\n"
+	printf "'-t TICKER' – jsou uvažovány pouze záznamy odpovídající danému tickeru.\n"
+	printf "Při více výskytech přepínače se bere množina všech uvedených tickerů.\n"
+	printf "'-w WIDTH' – u výpisu grafů nastavuje jejich šířku, tedy délku nejdelšího řádku na WIDTH.\n"
+	printf "Tedy, WIDTH musí být kladné celé číslo. Více výskytů přepínače je chybné spuštění.\n"
+}
+
+aftertime()
+{
+	out=$(echo "$out" | awk -F ';' \
+	       -v after="$AFTERTIME"    \
+	       '{
+	               if($1 > after)
+	               {
+	                       print
+	               }
+	       }')
+}
+
+beforetime()
+{
+	out=$(echo "$out" | awk -F ';' \
+		-v before="$BEFORETIME" \
+		'{
+		    	if($1 < before)
+			{
+				print
+			}
+		}')												
+}
+
+ticker()
+{
+	out=$(echo "$out" | awk -F ';' \
+		-v "ticker=^($TICKER)$" \
+		'{
+			if($2 ~ ticker)
+			{
+				print
+			}
+		}')
+}
+
+COMMAND=""
+AFTERTIME=""
+BEFORETIME=""
+TICKER=""
+INPUT=""
+WIDTH=0
+
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+	list-tick | pos | profit | last-price | hist-ord | graph-pos)
+		COMMAND="$1"
+		shift
+		;;
+	-h | --help)
+		help
+		exit 0
+		;;
+	-a)
+		AFTERTIME="$(date -d "$2" +"%Y-%m-%d %H:%M:%S")"
+		shift
+		shift
+		;;
+	-b)	
+		BEFORETIME="$(date -d "$2" +"%Y-%m-%d %H:%M:%S")"
+		shift
+		shift
+		;;
+	-t)
+		if [ -n "$TICKER" ]; then
+			TICKER="$TICKER|$2"
+		else
+			TICKER="$2"
+		fi
+		shift
+		shift
+		;;
+	-w)
+		WIDTH="$2"
+		if [ "$WIDTH" -lt 0 ]; then
+			echo >&2 "ERROR: Wrong value of WIDTH"
+			exit 0
+		fi
+		shift
+		shift
+		;;
+	*)
+		if echo "$1" | grep -q -e '.*.gz'; then
+			INPUT="$(gzip -d -c $1)"
+		else
+			INPUT="$(cat $1)"
+		fi
+		shift
+		;;
+	esac
+done
+
+if [ -z "$INPUT" ]; then
+	  INPUT=$(cat -)
+fi
+
+out=$INPUT
+
+if [ -n "$AFTERTIME" ]; then
+	aftertime "$out"
+fi
+
+if [ -n "$BEFORETIME" ]; then
+	beforetime "$out"
+fi
+
+if [ -n "$TICKER" ]; then
+	ticker "$out"
+fi
+
+if [ "$COMMAND" = "list-tick" ]; then
+	echo "$out" | awk -F ";" '{print $2}' | sort -u
+	exit 0
+fi
+
+if [ "$COMMAND" = "profit" ]; then
+	out=$(echo "$out" | awk -F ';' \
+	'{
+		if ($3 == "sell")
+		{
+			sum += $4 * $6
+		}
+		else	
+		{
+			sum -= $4 * $6
+		}}END{
+		printf("%.2f\n", sum)
+	}')
+fi
+
+if [ "$COMMAND" = "pos" ]; then
+	out=$(echo "$out" | awk -F ';' \
+	'{
+		if ($3 == "sell")
+		{
+			sum[$2] -= $6
+			value[$2] = $4
+		}
+		else
+		{
+			sum[$2] += $6
+			value[$2]= $4
+		}
+	}END{
+		for (i in sum)
+		{
+			num=sprintf("%.2f", sum[i]*value[i])
+			len=length(num)
+			if(len > longest){
+				longest=len
+			}
+		}
+		for (i in sum)
+		{
+			format = sprintf("%%-10s:%%%s.2f\n", (longest+1))
+			printf format, i, (sum[i]*value[i])
+		}
+	}' | sort -rn -t: -k2)
+	
+fi
+
+if [ "$COMMAND" = "last-price" ]; then
+	out=$(echo "$out" | awk -F ';' \
+	'{
+		sum[$2]=$4
+	}END{
+		for (i in sum)
+		{
+			num=sprintf("%.2f", sum[i])
+			len=length(num)
+			if(len > longest)
+			{
+				longest=len
+			}
+		}
+		for (i in sum)
+		{
+			format = sprintf("%%-10s:%%%s.2f\n", (longest+1))
+			printf format, i, sum[i]
+		}
+	}' | sort -t: -k1)	
+fi
+
+if [ "$COMMAND" = "hist-ord" ]; then
+	out=$(echo "$out" | awk -F ';' \
+		-v width="$WIDTH"		\
+	'{
+		sum[$2] += 1
+	}END{
+		for (i in sum)
+		{
+			num=sprintf("%.2f", sum[i])
+			len=length(num)
+			if(len > longest)
+			{
+				longest=len
+			}
+		}
+		for (i in sum)
+		{
+			printf "%-10s: " , i
+			if(width == 0)
+			{
+				for (j = 1; j <= sum[i]; j++)
+				{
+					printf "#"
+				}
+			}
+			else if(width > 0)
+			{
+				change= width/longest
+				sum[i] *= change
+				for (j = 1; j <= sum[i]; j++)
+				{
+					printf "#"
+				}
+			}
+			printf "\n"
+		}
+	}' | sort -t: -k1)
+fi
+
+if [ "$COMMAND" = "graph-pos" ]; then
+	out=$(echo "$out" | awk -F ';' \
+	'{
+		if ($3 == "sell")
+		{
+			count[$2] -= $6
+			value[$2] = $4
+		}
+		else
+		{
+			count[$2] += $6
+			value[$2]= $4
+		}
+	}END{
+                for (i in count)
+		{
+			count[i] *= $4
+			count[i] /= 1000
+			sum[i]=int(count[i])	
+			num=sprintf("%.2f", sum[i])
+			len=length(num)
+			if(len > longest)
+			{
+				longest=len
+			}
+		}
+		for (i in sum)
+		{	
+			printf "%-10s: " , i
+			if(width == 0)
+			{
+				if(sum[i] > 0)
+				{	
+					for (j = 1; j <= sum[i]; j++)
+					{
+						printf "#"
+					}
+				}
+				else
+				{
+					sum[i] = -sum[i]
+					for(j = 1; j <= sum[i]; j++)
+					{
+						printf "!"
+					}
+				}
+			}
+			else if (width > 0)
+			{
+				change= width/longest
+				sum[i] *= change
+				if(sum[i] > 0)
+				{
+					for (j = 1; j <= sum[i]; j++) #upravit
+					{
+						printf "#"
+					}
+				}
+				else
+				{
+					sum[i] = -sum[i]
+					for(j = 1; j <= sum[i]; j++)
+					{
+						printf "!"
+					}
+				}
+			}
+			printf "\n"
+		}
+	}' | sort -t: -k1)
+fi
+
+echo "$out"
+
+	#DATUM A CAS;TICKER;TYP TRANSAKCE;JEDNOTKOVA CENA;MENA;OBJEM;ID
